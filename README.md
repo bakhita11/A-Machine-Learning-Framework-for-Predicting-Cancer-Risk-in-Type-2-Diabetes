@@ -1,6 +1,3 @@
-# A-Machine-Learning-Framework-for-Predicting-Cancer-Risk-in-Type-2-Diabetes
-Certainly! Here is a **professional README.md** template for your research repository, tailored for your project on machine learning and diabetes/cancer risk prediction using synthetic CGM data.
-
 # A Machine Learning Framework for Predicting Cancer Risk in Type 2 Diabetes Using Simulated Continuous Glucose Monitoring Data
 
 ## Overview
@@ -47,7 +44,7 @@ Accurate risk prediction for cancer among patients with Type 2 diabetes is essen
 
 ### Usage
 
-1. Place your (or generated) synthetic data in the `data/` folder.
+1. Use the data generation code 
 2. Open and run `AI_Prediction_Diabetes.ipynb` in Jupyter Notebook or JupyterLab.
 3. Review results, figures, and metrics in the `results/` folder.
 
