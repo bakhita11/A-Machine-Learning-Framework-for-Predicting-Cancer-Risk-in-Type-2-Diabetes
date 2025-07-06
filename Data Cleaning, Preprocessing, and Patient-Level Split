@@ -1,0 +1,55 @@
+# --------------------------------------------------------------------
+# Data Cleaning, Preprocessing, and Patient-Level Split
+# --------------------------------------------------------------------
+
+# Step 1: Basic Data Cleaning and Preprocessing
+# ---------------------------------------------
+# Even though the data is synthetic, this section demonstrates best practices
+# for real-world workflows, including missing value handling, type enforcement,
+# and duplicate removal.
+
+# Remove any duplicate rows (should not occur in synthetic data, but included for completeness)
+data_encoded = data_encoded.drop_duplicates()
+
+# Check for missing values and report if any are found
+missing_summary = data_encoded.isnull().sum()
+print("Missing values per column:\n", missing_summary)
+
+# Optionally, fill or drop missing values (not expected in this synthetic dataset)
+# For real data, you might use:
+# data_encoded = data_encoded.dropna()  # Drop rows with any missing values
+# or
+# data_encoded = data_encoded.fillna(method='ffill')  # Forward-fill missing values
+
+# Enforce correct data types for each column
+data_encoded['PatientID'] = data_encoded['PatientID'].astype(int)
+data_encoded['event'] = data_encoded['event'].astype(int)
+data_encoded['Timestamp'] = pd.to_datetime(data_encoded['Timestamp'])
+
+# Step 2: Patient-Level Train/Test Split
+# --------------------------------------
+# To prevent data leakage, we split the dataset at the patient level:
+# All data from a single patient is assigned to either the training or test set, never both.
+
+from sklearn.model_selection import train_test_split
+
+# Get unique patient IDs
+patient_ids = data_encoded['PatientID'].unique()
+
+# Split patient IDs into training and test sets (e.g., 80% train, 20% test)
+train_pids, test_pids = train_test_split(
+    patient_ids,
+    test_size=0.2,
+    random_state=42,
+    shuffle=True
+)
+
+# Select all rows for patients in the training set
+train_data = data_encoded[data_encoded['PatientID'].isin(train_pids)].reset_index(drop=True)
+# Select all rows for patients in the test set
+test_data = data_encoded[data_encoded['PatientID'].isin(test_pids)].reset_index(drop=True)
+
+print(f"Training patients: {len(train_pids)}, Test patients: {len(test_pids)}")
+print(f"Training rows: {len(train_data)}, Test rows: {len(test_data)}")
+
+# Proceed with feature selection, model training, and evaluation as before.
