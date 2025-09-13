@@ -1,0 +1,215 @@
+# Open In Colab
+import pandas as pd
+import numpy as np
+from pathlib import Path
+
+# Machine Learning imports
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, cross_val_score
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_selection import RFECV
+from sklearn.metrics import accuracy_score, roc_auc_score, classification_report, confusion_matrix
+from sklearn.preprocessing import LabelEncoder
+from scipy.stats import randint
+import matplotlib.pyplot as plt
+
+# ---------------------------
+# 1) Load your attached data
+# ---------------------------
+DATA_PATH = Path("/mnt/data/Type 2 - Dataset.csv")  # Path to your uploaded dataset
+assert DATA_PATH.exists(), f"File not found: {DATA_PATH}"
+
+# Read a small preview to inspect schema
+df_head = pd.read_csv(DATA_PATH, nrows=5000, low_memory=False)
+all_cols = df_head.columns.tolist()
+
+# Read the full dataset (adjust if memory-constrained)
+df = pd.read_csv(DATA_PATH, low_memory=False)
+print("Loaded shape:", df.shape)
+print("Columns:", list(df.columns)[:25], "...")
+
+# ----------------------------------------------------------
+# 2) Choose a target column (auto-detect with sensible order)
+#    You can force a target by setting TARGET_OVERRIDE below
+# ----------------------------------------------------------
+TARGET_OVERRIDE = None  # e.g., "CancerDeath" or "Diabetes_binary"
+preferred_targets = [
+    # Cancer outcomes first (your stated research)
+    "CancerDeath", "Cancer_Mortality", "Cancer", "AnyCancer", "CancerFlag",
+    # Diabetes status fallbacks if cancer not present
+    "Diabetes_binary", "Diabetes_012", "Outcome", "event", "target", "label", "Class"
+]
+
+if TARGET_OVERRIDE and TARGET_OVERRIDE in df.columns:
+    target_col = TARGET_OVERRIDE
+else:
+    target_col = next((c for c in preferred_targets if c in df.columns), None)
+
+if target_col is None:
+    raise ValueError(
+        "No obvious target column found. Please set TARGET_OVERRIDE "
+        "to the correct column name in your dataset."
+    )
+
+print(f"Selected target: {target_col}")
+print(df[target_col].value_counts(dropna=False).head(10))
+
+# ----------------------------------------------------
+# 3) (Optional) Filter to T2DM patients if needed
+#     Uncomment if dataset mixes T2DM and non-T2DM
+# ----------------------------------------------------
+t2dm_flags = [c for c in ["T2DM", "Type2DM", "Diabetes_binary", "DIQ010"] if c in df.columns]
+
+# If cancer is target and T2DM flags exist, subset to T2DM == 1
+if len(t2dm_flags) > 0 and "Cancer" in target_col:
+    t2dm_flag = t2dm_flags[0]
+    # Convert 'yes'/'no' strings to binary if needed
+    if df[t2dm_flag].dtype == "O":
+        df[t2dm_flag] = df[t2dm_flag].str.lower().map({"yes": 1, "no": 0}).fillna(df[t2dm_flag])
+    before = df.shape[0]
+    df = df[df[t2dm_flag].astype(float) == 1]
+    print(f"Filtered to T2DM == 1 using '{t2dm_flag}': {before} -> {df.shape[0]} rows")
+
+# ----------------------------------------------------
+# 4) Clean & assemble features
+# ----------------------------------------------------
+# Drop rows missing the target
+df = df.dropna(subset=[target_col]).copy()
+
+# Drop ID-like or timestamp columns if present
+drop_like = {"SEQN", "PatientID", "Timestamp", "ID", "respondent_id", "RIDSTATR"}
+feature_cols = [c for c in df.columns if c != target_col and c not in drop_like]
+
+X_raw = df[feature_cols].copy()
+y_raw = df[target_col].copy()
+
+# Encode target if categorical
+if not np.issubdtype(y_raw.dtype, np.number):
+    le = LabelEncoder()
+    y = pd.Series(le.fit_transform(y_raw), index=y_raw.index, name=target_col)
+    target_mapping = dict(zip(le.classes_, le.transform(le.classes_)))
+    print("Encoded target mapping:", target_mapping)
+else:
+    y = y_raw.copy()
+    target_mapping = None
+
+# One-hot encode categorical features (drop_first=True for multicollinearity reduction)
+X = pd.get_dummies(X_raw, drop_first=True)
+
+# Fill NA with median (random forest cannot handle NA)
+X = X.replace([np.inf, -np.inf], np.nan).fillna(X.median())
+
+print("Feature matrix shape after encoding:", X.shape)
+
+# ----------------------------------------------------
+# 5) Train/test split
+# ----------------------------------------------------
+stratify = y if y.nunique() > 1 else None
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=stratify
+)
+
+# ----------------------------------------------------
+# 6) Feature selection with RFECV
+# ----------------------------------------------------
+rf_base = RandomForestClassifier(
+    n_estimators=200, random_state=42, n_jobs=-1, class_weight="balanced"
+)
+
+scorer = "roc_auc_ovr" if y.nunique() > 2 else "roc_auc"
+
+rfecv = RFECV(estimator=rf_base, step=1, cv=3, scoring=scorer, n_jobs=-1)
+rfecv.fit(X_train, y_train)
+
+selected_features = X_train.columns[rfecv.support_]
+print(f"RFECV selected {len(selected_features)} features (of {X_train.shape[1]}).")
+
+X_train_sel = X_train[selected_features]
+X_test_sel = X_test[selected_features]
+
+# ----------------------------------------------------
+# 7) Random Forest hyperparameter search
+# ----------------------------------------------------
+param_dist = {
+    "n_estimators": randint(150, 500),
+    "max_depth": randint(3, 30),
+    "min_samples_split": randint(2, 12),
+    "min_samples_leaf": randint(1, 12),
+    "max_features": ["sqrt", "log2", None]
+}
+
+rf = RandomForestClassifier(random_state=42, n_jobs=-1, class_weight="balanced")
+
+rand_search = RandomizedSearchCV(
+    rf, param_distributions=param_dist, n_iter=30, cv=3,
+    scoring=scorer, n_jobs=-1, random_state=42
+)
+
+rand_search.fit(X_train_sel, y_train)
+best_rf = rand_search.best_estimator_
+print("Best params:", rand_search.best_params_)
+
+# ----------------------------------------------------
+# 8) Train & evaluate
+# ----------------------------------------------------
+best_rf.fit(X_train_sel, y_train)
+
+y_pred = best_rf.predict(X_test_sel)
+
+# Calculate AUC (binary or multiclass)
+try:
+    y_proba = best_rf.predict_proba(X_test_sel)
+    if y.nunique() > 2:
+        auc = roc_auc_score(y_test, y_proba, multi_class="ovr")
+    else:
+        auc = roc_auc_score(y_test, y_proba[:, 1])
+except Exception:
+    auc = np.nan
+
+acc = accuracy_score(y_test, y_pred)
+cm = confusion_matrix(y_test, y_pred)
+rep = classification_report(y_test, y_pred, zero_division=0)
+
+print(f"Accuracy: {acc:.3f}")
+print(f"AUC: {auc if np.isnan(auc) else round(auc,3)}")
+print("Confusion matrix:\n", cm)
+print("\nClassification report:\n", rep)
+
+# ----------------------------------------------------
+# 9) Plot top features by Random Forest importance
+# ----------------------------------------------------
+importances = getattr(best_rf, "feature_importances_", None)
+
+if importances is not None:
+    order = np.argsort(importances)[::-1]
+    topk = min(20, len(order))
+
+    plt.figure(figsize=(10, 6))
+    plt.barh(selected_features[order][:topk], importances[order][:topk])
+    plt.gca().invert_yaxis()
+    plt.xlabel("Feature Importance")
+    plt.title("Top Features (Random Forest)")
+    plt.tight_layout()
+    plt.show()
+
+# ----------------------------------------------------
+# 10) (Optional) Cross-validation on train split
+# ----------------------------------------------------
+cv_scores = cross_val_score(best_rf, X_train_sel, y_train, cv=3, scoring=scorer, n_jobs=-1)
+print(f"{3}-Fold CV {scorer}: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
+
+# ----------------------------------------------------
+# Additional snippet for parking violation data example:
+# Group by 'Registration State' and find most common 'Violation Description'
+# ----------------------------------------------------
+# Assuming df_parking is defined: Here's how to find the top violation per state:
+
+# result = (
+#     df_parking[["Registration State", "Violation Description"]]
+#     .value_counts()              # count combinations of state+violation
+#     .groupby(level=0)            # group by the first index level (state)
+#     .head(1)                    # take top (most frequent) violation per state
+#     .sort_index()               # sort alphabetically by state
+#     .reset_index(name="Count")  # reset to DataFrame with count column
+# )
+# print(result)
